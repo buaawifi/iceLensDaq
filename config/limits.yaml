@@ -1,0 +1,90 @@
+# limits.yaml — safety, interlocks, controllers (envIceLens)
+meta:
+  version: 0.2
+  updated: 2025-10-22
+  notes: |
+    Safety > Manual > Auto precedence. Trips immediately force the on_trip outputs below.
+    T_hot uses the main heater (PPS1001). PPS1002 is available as an auxiliary/trace supply
+    and defaults to manual mode.
+
+# ===== Global thresholds =====
+P_max:       200     # kPa  Overpressure trip
+P_min:       20      # kPa  Minimum shell pressure target
+T_hot_max:   80      # °C   Hot plate over-temp trip
+T_cold_min: -25      # °C   Cold plate sensor protection
+T_cold_max:  10      # °C   Sanity ceiling
+
+# ===== Interlocks =====
+# These are boolean expressions evaluated on each control tick.
+interlocks:
+  heater_enable: "P_shell >= 50 and T_cold <= -5"          # Only heat when shell is pressurized and cold loop is cold
+  aux_heater_enable: "P_shell >= 50"                        # Example for PPS1002 if used
+
+# ===== Trip conditions =====
+# If any expression evaluates true → enter FAULT state and apply on_trip outputs.
+trips:
+  - "P_shell > P_max"
+  - "T_hot > T_hot_max"
+  - "T_cold < T_cold_min"
+  - "comm_bad == true"           # Set by HAL when any device read/write is bad
+
+# ===== Actions when in FAULT =====
+# Safe outputs to minimize risk (tune for your plant):
+on_trip:
+  pump_cmd: 20.0        # keep some circulation to avoid local hotspots (or set to 0 if desired)
+  heater_cmd: 0.0       # cut main heater
+  heater2_cmd: 0.0      # cut aux heater
+  valve_cmd: 100.0      # fully open shell valve to relieve pressure
+
+# ===== Controllers =====
+# PID gains are conservative starting points; tune with small steps.
+controllers:
+  # --- Cold plate temperature loop ---
+  T_cold:
+    mv: pump_cmd
+    mode: auto
+    pid: { Kp: 2.0, Ki: 0.02, Kd: 0.0, Ts: 1.0 }  # Ts in seconds
+    output_limits: { lo: 20.0, hi: 100.0 }        # keep pump above stall
+    rate_limit: { up: 30.0, down: 30.0 }          # % per minute
+
+  # --- Hot plate temperature loop (main heater, with interlock) ---
+  T_hot:
+    mv: heater_cmd
+    mode: auto
+    enable_expr: "heater_enable"
+    pid: { Kp: 4.0, Ki: 0.05, Kd: 0.0, Ts: 1.0 }
+    output_limits: { lo: 0.0, hi: 100.0 }
+    rate_limit: { up: 50.0, down: 50.0 }
+
+  # --- Shell pressure loop via analog valve ---
+  P_shell:
+    mv: valve_cmd
+    mode: auto
+    pid: { Kp: 1.5, Ki: 0.03, Kd: 0.0, Ts: 1.0 }
+    output_limits: { lo: 0.0, hi: 100.0 }
+    rate_limit: { up: 60.0, down: 60.0 }
+
+  # --- Auxiliary heater (PPS1002) default to manual ---
+  AUX_heater:
+    mv: heater2_cmd
+    mode: manual             # UI can set a fixed output or later enable a loop
+    output_limits: { lo: 0.0, hi: 100.0 }
+
+# ===== Signal conditioning (per tag) =====
+filters:
+  T_hot:   { type: ema, alpha: 0.2 }
+  T_cold:  { type: ema, alpha: 0.2 }
+  P_shell: { type: ema, alpha: 0.2 }
+
+# ===== Optional controller features =====
+features:
+  anti_windup: backcalc     # back-calculation AWU on output saturation
+  bumpless: true            # smooth mode/manual↔auto transfers
+  deadband:
+    P_shell: 2.0            # kPa band to reduce valve hunting
+
+# ===== Service periods (informative; runtime may override) =====
+periods:
+  daq_period_ms: 200
+  control_period_ms: 1000
+  log_period_ms: 1000

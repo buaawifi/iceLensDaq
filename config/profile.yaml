@@ -1,0 +1,54 @@
+# profile.yaml — AUTO recipe (envIceLens)
+meta:
+  version: 0.2
+  updated: 2025-10-22
+  notes: |
+    Time-based setpoint program. The orchestrator linearly slews PV setpoints to the
+    segment targets over each ramp, then holds them during soak segments. Tags in
+    targets must correspond to controller PVs (T_cold, T_hot, P_shell).
+
+# If true, resume from the last completed segment on app restart
+resume_on_start: true
+
+# Optional defaults (orchestrator may ignore if unsupported)
+defaults:
+  settle_tolerance:
+    T_cold: 0.5   # °C
+    T_hot:  0.5   # °C
+    P_shell: 3.0  # kPa
+  settle_hold_s: 30         # hold this long inside tolerance before advancing (for soak only)
+
+# Program segments
+# - type: ramp | soak
+# - duration: seconds (integer)
+# - targets: map of PV → setpoint
+segments:
+  # 1) Pre-cool & pre-pressurize to avoid frosting
+  - type: ramp
+    duration: 600
+    targets: { T_cold: -10, T_hot: 20, P_shell: 120 }
+
+  - type: soak
+    duration: 900
+    targets: { T_cold: -10, T_hot: 20, P_shell: 120 }
+
+  # 2) Step to test condition (warmer hot plate, slightly higher shell pressure)
+  - type: ramp
+    duration: 600
+    targets: { T_cold:  -5, T_hot: 25, P_shell: 150 }
+
+  - type: soak
+    duration: 1200
+    targets: { T_cold:  -5, T_hot: 25, P_shell: 150 }
+
+  # 3) Return to safe/idle condition for teardown or next run
+  - type: ramp
+    duration: 300
+    targets: { T_cold: 0, T_hot: 25, P_shell: 50 }
+
+  - type: soak
+    duration: 300
+    targets: { T_cold: 0, T_hot: 25, P_shell: 50 }
+
+# Behavior after the last segment
+on_complete: hold   # hold | idle

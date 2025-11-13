@@ -1,0 +1,7 @@
+pymodbus
+pyserial
+ruamel.yaml
+numpy
+pandas
+loguru
+PyQt6
