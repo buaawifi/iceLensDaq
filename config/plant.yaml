@@ -1,70 +1,71 @@
-# plant.yaml — envIceLens (integrated, AI1001=DAM-3151 32ch)
+# plant.yaml — IceLens experimental rig (DAM-3151+H on AI1001)
 meta:
   name: IceLens experimental rig
   version: 0.3
   updated: 2025-11-13
   notes: |
     Two independent RS-485 buses. Cold plate pump is controllable; hot loop chiller (CP1002) is fixed −5 °C,
-    so the hot plate is heated electrically. Two programmable power supplies (PPS1001/PPS1002) are available
-    for main heater and auxiliary/trace heater respectively. Adjust COM ports, baud, and addresses to match
-    your wiring & IO table. AI1001 is now a 32-channel DAM-3151 module; channel mapping follows IO表.xlsx.
+    so the hot plate is heated electrically. AI1001 is now a 32-channel DAM-3151+H module. Channel mapping
+    follows the latest IO table.
 
-# === RS-485 buses (update to your PC) ===
+# === RS-485 buses (update to match your PC) ===
 ports:
   control_bus: { port: COM3, baud: 9600, parity: N, stopbits: 1, bytesize: 8, timeout_ms: 200 }
-  daq_bus:     { port: COM4, baud: 9600, parity: N, stopbits: 1, bytesize: 8, timeout_ms: 200 }
+  daq_bus:     { port: COM5, baud: 9600, parity: N, stopbits: 1, bytesize: 8, timeout_ms: 200 }   # AI1001 port (adjust if needed)
 
 # === Devices (unique Modbus addr per bus) ===
 devices:
   # Actuators / control bus
-  CP1001:   { type: Pump, addr: 1, bus: control_bus }                 # Cold plate cryogenic pump (speed %)
-  PPS1001:  { type: PPS,  addr: 4, bus: control_bus }                 # Main heater supply (hot plate)
-  PPS1002:  { type: PPS,  addr: 5, bus: control_bus }                 # Aux/trace heater supply
-  AO1001:   { type: AO,   addr: 3, bus: control_bus, channels: 12, mode: "0-10V" }  # Analog outputs (valves, etc.)
+  CP1001:   { type: Pump, addr: 1, bus: control_bus }                              # Cold plate pump (speed %)
+  PPS1001:  { type: PPS,  addr: 4, bus: control_bus }                              # Main heater supply (hot plate)
+  PPS1002:  { type: PPS,  addr: 5, bus: control_bus }                              # Aux/trace heater supply
+  AO1001:   { type: AO,   addr: 3, bus: control_bus, channels: 12, mode: "0-10V" } # Analog outputs (e.g. valves)
 
   # Instrumentation / DAQ bus
-  AI1001:   { type: AI,   addr: 1, bus: daq_bus, channels: 32 }       # DAM-3151 32ch analog inputs (see IO表.xlsx)
+  AI1001:   { type: AI,   addr: 1, bus: daq_bus, channels: 32, range: "mixed" }    # DAM-3151+H, 32 AI channels
   TDA1001:  { type: TDA,  addr: 2, bus: daq_bus, channels: 16, sensor: "K" }       # Thermocouples (hot/cold)
 
-# === Tag table: engineering tags used by the app ===
-# HAL translates {device,channel} to real Modbus registers according to each device handbook.
+# === Tag table (engineering tags) ===
+# HAL maps {device,channel} to Modbus registers using each device's handbook.
 points:
-  # --- Core sensors used by control / safety (PVs) ---
-  T_hot:     { device: TDA1001, channel: 1, unit: "°C",  scale: { gain: 1.0, offset: 0.0 } }
-  T_cold:    { device: TDA1001, channel: 2, unit: "°C",  scale: { gain: 1.0, offset: 0.0 } }
-  P_shell:   { device: AI1001,  channel: 18, unit: "kPa", scale: { gain: 1.0, offset: 0.0 } }  # PT1001 → AI1001 CH18 (1–5V)
+  # --- Thermocouples (through TDA1001) ---
+  T_hot:     { device: TDA1001, channel: 1, unit: "°C",   scale: { gain: 1.0, offset: 0.0 } }
+  T_cold:    { device: TDA1001, channel: 2, unit: "°C",   scale: { gain: 1.0, offset: 0.0 } }
 
-  # --- Additional AI1001 channels (for logging/diagnostics) ---
-  T_env:     { device: AI1001, channel: 16, unit: "°C",  scale: { gain: 1.0, offset: 0.0 } }   # THT1001 temperature (0–5V)
-  RH_env:    { device: AI1001, channel: 17, unit: "%",   scale: { gain: 1.0, offset: 0.0 } }   # THT1001 humidity (0–5V)
-  PV1001_fb: { device: AI1001, channel: 19, unit: "%",   scale: { gain: 1.0, offset: 0.0 } }   # PV1001 position feedback (1–5V)
-  DT1001:    { device: AI1001, channel: 24, unit: "mm",  scale: { gain: 1.0, offset: 0.0 } }   # Laser displacement (4–20mA)
-  CV1001_fb: { device: AI1001, channel: 25, unit: "%",   scale: { gain: 1.0, offset: 0.0 } }   # Valve CV1001 feedback (4–20mA)
-  CV1002_fb: { device: AI1001, channel: 26, unit: "%",   scale: { gain: 1.0, offset: 0.0 } }   # Valve CV1002 feedback (4–20mA)
-  CV1003_fb: { device: AI1001, channel: 28, unit: "%",   scale: { gain: 1.0, offset: 0.0 } }   # Valve CV1003 feedback (4–20mA)
-  FT1001:    { device: AI1001, channel: 29, unit: "raw", scale: { gain: 1.0, offset: 0.0 } }   # Flow meter 1 (4–20mA, calibrate in post)
-  FT1002:    { device: AI1001, channel: 30, unit: "raw", scale: { gain: 1.0, offset: 0.0 } }   # Flow meter 2 (4–20mA, calibrate in post)
+  # --- Environment sensor THT1001 (0–5 V, wired to AI1001 ch16/17) ---
+  T_env:     { device: AI1001, channel: 16, unit: "°C",   scale: { gain: 1.0, offset: 0.0 } }
+  RH_env:    { device: AI1001, channel: 17, unit: "%",    scale: { gain: 1.0, offset: 0.0 } }
 
-  # --- Actuators (MVs) ---
-  pump_cmd:      { device: CP1001,  kind: percent, unit: "%",  scale: { gain: 1.0, offset: 0.0 } }
-  heater_cmd:    { device: PPS1001, kind: percent, unit: "%",  scale: { gain: 1.0, offset: 0.0 } }   # main heater
-  heater2_cmd:   { device: PPS1002, kind: percent, unit: "%",  scale: { gain: 1.0, offset: 0.0 } }   # aux/trace heater
+  # --- Shell pressure PT1001 (1–5 V, AI1001 ch18) ---
+  P_shell:   { device: AI1001, channel: 18, unit: "kPa",  scale: { gain: 1.0, offset: 0.0 } }
 
-  # Analog valve output (shell pressure control) — wired via AO1001 (see IO表 for exact valve)
+  # --- Proportional valve PV1001 feedback (1–5 V, AI1001 ch19) ---
+  PV1001_fb: { device: AI1001, channel: 19, unit: "%",    scale: { gain: 1.0, offset: 0.0 } }
+
+  # --- Laser displacement sensor DT1001 (4–20 mA, AI1001 ch24) ---
+  DT1001:    { device: AI1001, channel: 24, unit: "mm",   scale: { gain: 1.0, offset: 0.0 } }
+
+  # --- Control valve feedbacks CV1001/2/3 (4–20 mA, AI1001 ch25/26/28) ---
+  CV1001_fb: { device: AI1001, channel: 25, unit: "%",    scale: { gain: 1.0, offset: 0.0 } }
+  CV1002_fb: { device: AI1001, channel: 26, unit: "%",    scale: { gain: 1.0, offset: 0.0 } }
+  CV1003_fb: { device: AI1001, channel: 28, unit: "%",    scale: { gain: 1.0, offset: 0.0 } }
+
+  # --- Flowmeters FT1001/2 (4–20 mA, AI1001 ch29/30) ---
+  FT1001:    { device: AI1001, channel: 29, unit: "L/min", scale: { gain: 1.0, offset: 0.0 } }
+  FT1002:    { device: AI1001, channel: 30, unit: "L/min", scale: { gain: 1.0, offset: 0.0 } }
+
+  # --- Actuators (software commands as engineering percent/volts) ---
+  pump_cmd:    { device: CP1001,  kind: percent, unit: "%", scale: { gain: 1.0, offset: 0.0 } }
+  heater_cmd:  { device: PPS1001, kind: percent, unit: "%", scale: { gain: 1.0, offset: 0.0 } }   # main heater
+  heater2_cmd: { device: PPS1002, kind: percent, unit: "%", scale: { gain: 1.0, offset: 0.0 } }   # aux/trace heater
+
+  # Analog valve output (shell pressure control, AO1001 ch6 → 0–10 V)
   valve_cmd:
     device: AO1001
-    channel: 6             # CH6 on AO1001 → 0x000F holding reg on AO module
+    channel: 6
     unit: "V"
-    reg_scale: 1000        # fixed 3 decimals: 1.000 V → 1000 raw
+    reg_scale: 1000        # 1.000 V → 1000 raw (fixed 3 decimals)
 
-# --- Optional logic/aliases (evaluated in software) ---
 logic:
   comm_bad:       "any_device_bad()"
-  heater_enable:  "P_shell >= 50 && T_cold <= -5"    # interlock used by limits.yaml (hot plate only when safe)
-
-# --- Register mapping hints (documentation only; HAL may hardcode these) ---
-# AO module: CH1 at 0x000A; CHn at 0x000A + (n-1), write holding register in fixed 3 decimals.
-# AI module (AI1001 / DAM-3151): each channel is a 16-bit register; see handbook & drivers.AI for base address.
-# TDA (DAM-3130D H): per-channel thermocouple reading via Input Registers; type configured in device.
-# PPS: power_cmd at 0x0001 (holding), power_fb at 0x1001 (input) — common pattern; confirm with handbook.
-# Pump: speed_cmd at 0x0001, speed_fb at 0x1001, status at 0x1100 (bitfield) — confirm with pump manual.
+  heater_enable:  "P_shell >= 50 && T_cold <= -5"

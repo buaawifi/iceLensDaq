@@ -1,46 +1,20 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List
 from time import sleep
-from importlib import import_module
 from loguru import logger
+import inspect
 
-# --- Detect client import path (3.x vs 2.x) ---
 try:
-    from pymodbus.client import ModbusSerialClient  # 3.x
-    PM_VER = "3.x"
+    from pymodbus.client import ModbusSerialClient  # pymodbus 3.x+
+    PM_VER = "3.x+"
 except Exception:  # pragma: no cover
-    from pymodbus.client.sync import ModbusSerialClient  # 2.x
+    from pymodbus.client.sync import ModbusSerialClient  # pymodbus 2.x
     PM_VER = "2.x"
 
-# --- Try to import the enum FramerType (3.x style). Some releases expose it at root. ---
-_FrType = None
-try:
-    # Preferred in many 3.x builds
-    from pymodbus import FramerType as _FrType  # type: ignore[attr-defined]
-except Exception:
-    try:
-        # Some builds expose it here
-        from pymodbus.framer import FramerType as _FrType  # type: ignore[attr-defined]
-    except Exception:
-        _FrType = None
-
-# Modbus Parity options
-PARITY = {"N": "N", "E": "E", "O": "O"}
 
 @dataclass
 class BusSpec:
-    """
-    Represents the configuration parameters for a Modbus communication bus.
-
-    Attributes:
-        port (str): The serial port to use for communication (e.g., COM1, /dev/ttyS0).
-        baud (int): The baud rate for communication (default is 9600).
-        parity (str): The parity bit for error checking (default is 'N' for None).
-        stopbits (int): The number of stop bits used in communication (default is 1).
-        bytesize (int): The number of data bits in each byte (default is 8).
-        timeout_ms (int): The timeout period in milliseconds for client operations (default is 200ms).
-    """
     port: str
     baud: int = 9600
     parity: str = "N"
@@ -48,183 +22,163 @@ class BusSpec:
     bytesize: int = 8
     timeout_ms: int = 200
 
-def _build_client(spec: BusSpec) -> ModbusSerialClient:
-    """
-    Builds and returns a ModbusSerialClient based on the given BusSpec configuration.
-    Handles compatibility with different versions of `pymodbus` (3.x vs 2.x).
-
-    Args:
-        spec (BusSpec): The Modbus bus specification (port, baud, parity, etc.).
-
-    Returns:
-        ModbusSerialClient: A configured Modbus client instance.
-
-    Notes:
-        - 2.x uses method="rtu".
-        - 3.x prefers using framer=FramerType.RTU (enum). If not available, it falls back to "rtu".
-    """
-    if PM_VER == "2.x":
-        return ModbusSerialClient(
-            method="rtu",
-            port=spec.port,
-            baudrate=spec.baud,
-            parity=PARITY.get(spec.parity.upper(), "N"),
-            stopbits=spec.stopbits,
-            bytesize=spec.bytesize,
-            timeout=spec.timeout_ms / 1000.0,
-        )
-
-    # 3.x path (keyword-only params per 3.8+ API changes)
-    common = dict(
-        port=spec.port,
-        baudrate=spec.baud,
-        parity=PARITY.get(spec.parity.upper(), "N"),
-        stopbits=spec.stopbits,
-        bytesize=spec.bytesize,
-        timeout=spec.timeout_ms / 1000.0,
-    )
-    if _FrType is not None:  # enum present
-        logger.debug("Using framer=FramerType.RTU")
-        return ModbusSerialClient(framer=_FrType.RTU, **common)  # type: ignore[arg-type]
-
-    # last resort: some 3.x builds accept string name
-    logger.debug('Using framer="rtu" (enum not found)')
-    return ModbusSerialClient(framer="rtu", **common)
 
 class ModbusBus:
-    """
-    Represents a Modbus communication bus for interacting with Modbus devices.
-
-    Attributes:
-        name (str): The name of the bus (e.g., 'control_bus', 'daq_bus').
-        spec (BusSpec): The configuration parameters for the bus (e.g., port, baud rate).
-        client (Optional[ModbusSerialClient]): The Modbus client instance for communication.
-        ok (bool): Indicates if the bus is successfully connected.
-
-    Methods:
-        open():
-            Opens the Modbus connection using the specified bus configuration.
-        close():
-            Closes the Modbus connection if it is open.
-        read_input(unit: int, address: int, count: int = 1):
-            Reads input registers from the Modbus bus.
-        read_holding(unit: int, address: int, count: int = 1):
-            Reads holding registers from the Modbus bus.
-        write_holding(unit: int, address: int, value: int):
-            Writes a value to a holding register on the Modbus bus.
-        try_until_ok(fn, retries=1, delay=0.05, *a, **kw):
-            Attempts to call a function repeatedly until successful or retries are exhausted.
-    """
-    
     def __init__(self, name: str, spec: BusSpec):
-        """
-        Initializes the ModbusBus instance with the given name and bus configuration.
-
-        Args:
-            name (str): The name of the Modbus bus (e.g., 'control_bus').
-            spec (BusSpec): The configuration for the Modbus bus (e.g., port, baud rate).
-        """
         self.name = name
         self.spec = spec
         self.client: Optional[ModbusSerialClient] = None
-        self.ok = False
+        self.ok: bool = False
+        self._addr_kw: Optional[str] = None  # "unit", "slave" or "device_id"
 
-    def open(self):
-        """
-        Opens the Modbus connection using the specified bus configuration.
-        If the connection is successful, sets `self.ok` to True.
+    # --- connection management ---
+    def _build_client(self) -> ModbusSerialClient:
+        timeout_s = max(self.spec.timeout_ms, 50) / 1000.0
+        client = ModbusSerialClient(
+            port=self.spec.port,
+            baudrate=self.spec.baud,
+            bytesize=self.spec.bytesize,
+            parity=self.spec.parity,
+            stopbits=self.spec.stopbits,
+            timeout=timeout_s,
+            # method="rtu",   # ok for 2.x, accepted/ignored in 3.x+
+        )
+        return client
 
-        Logs the connection attempt and success/failure.
-        """
-        self.client = _build_client(self.spec)
-        self.ok = bool(self.client.connect())
+    def open(self) -> bool:
+        if self.client is not None:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+
+        self.client = self._build_client()
+        try:
+            self.ok = bool(self.client.connect())
+        except Exception as e:  # pragma: no cover
+            logger.error(f"[{self.name}] connect error on {self.spec.port}: {e}")
+            self.ok = False
+
         logger.info(f"[{self.name}] open {self.spec.port} (pymodbus {PM_VER}) -> {self.ok}")
 
-    def close(self):
-        """
-        Closes the Modbus connection if it is open.
+        if self.ok:
+            self._detect_addr_kw()
 
-        Sets `self.ok` to False once the connection is closed.
-        """
-        if self.client:
+        return self.ok
+
+    def close(self):
+        if self.client is not None:
             try:
                 self.client.close()
             except Exception:
                 pass
         self.ok = False
 
-    # --- helpers (standardize on unit= for 3.x; also valid in late 2.x) ---
-    def read_input(self, unit: int, address: int, count: int = 1):
+    # --- helpers ---
+    def _detect_addr_kw(self):
         """
-        Reads input registers from the Modbus client.
-
-        Args:
-            unit (int): The Modbus unit identifier (e.g., device address).
-            address (int): The starting address of the register to read.
-            count (int): The number of registers to read (default is 1).
-
-        Returns:
-            list: A list of register values if successful, or None if the client is not connected.
+        Detect which keyword the client expects for the unit id.
+        Newer pymodbus uses ``device_id`` or ``slave`` instead of ``unit``.
         """
-        if not self.ok:
+        fn = getattr(self.client, "read_holding_registers", None)
+        if fn is None:
+            self._addr_kw = None
+            return
+
+        try:
+            sig = inspect.signature(fn)
+            for cand in ("unit", "slave", "device_id"):
+                if cand in sig.parameters:
+                    self._addr_kw = cand
+                    break
+        except Exception:
+            self._addr_kw = "unit"
+
+    def _call_read(self, which: str, unit: int, address: int, count: int = 1) -> Optional[List[int]]:
+        if not self.ok or self.client is None:
             return None
-        rr = self.client.read_input_registers(address=address, count=count, unit=unit)
+
+        fn_name = "read_input_registers" if which == "input" else "read_holding_registers"
+        fn = getattr(self.client, fn_name, None)
+        if fn is None:
+            logger.error(f"[{self.name}] client has no {fn_name}")
+            return None
+
+        # First try keyword-based call
+        if self._addr_kw:
+            kwargs = {"address": address, "count": count, self._addr_kw: unit}
+            try:
+                rr = fn(**kwargs)
+            except TypeError as e:
+                logger.debug(f"[{self.name}] {fn_name} kw call failed ({e}), retrying positional.")
+                rr = None
+            except Exception as e:
+                logger.debug(f"[{self.name}] {fn_name} error: {e}")
+                return None
+        else:
+            rr = None
+
+        # Fallback to positional (old 2.x style)
+        if rr is None:
+            try:
+                rr = fn(address, count, unit)
+            except Exception as e:
+                logger.debug(f"[{self.name}] {fn_name} positional error: {e}")
+                return None
+
+        if not rr or getattr(rr, "isError", lambda: True)():
+            return None
+
         return getattr(rr, "registers", None)
 
-    def read_holding(self, unit: int, address: int, count: int = 1):
-        """
-        Reads holding registers from the Modbus client.
-
-        Args:
-            unit (int): The Modbus unit identifier (e.g., device address).
-            address (int): The starting address of the register to read.
-            count (int): The number of registers to read (default is 1).
-
-        Returns:
-            list: A list of register values if successful, or None if the client is not connected.
-        """
-        if not self.ok:
-            return None
-        rr = self.client.read_holding_registers(address=address, count=count, unit=unit)
-        return getattr(rr, "registers", None)
-
-    def write_holding(self, unit: int, address: int, value: int):
-        """
-        Writes a value to a holding register on the Modbus client.
-
-        Args:
-            unit (int): The Modbus unit identifier (e.g., device address).
-            address (int): The address of the register to write to.
-            value (int): The value to write to the register.
-
-        Returns:
-            bool: True if the write was successful, False otherwise.
-        """
-        if not self.ok:
+    def _call_write(self, unit: int, address: int, value: int) -> bool:
+        if not self.ok or self.client is None:
             return False
-        rq = self.client.write_register(address=address, value=value, unit=unit)
+
+        fn = getattr(self.client, "write_register", None)
+        if fn is None:
+            logger.error(f"[{self.name}] client has no write_register")
+            return False
+
+        if self._addr_kw:
+            kwargs = {"address": address, "value": value, self._addr_kw: unit}
+            try:
+                rq = fn(**kwargs)
+            except TypeError as e:
+                logger.debug(f"[{self.name}] write_register kw call failed ({e}), retrying positional.")
+                rq = None
+            except Exception as e:
+                logger.debug(f"[{self.name}] write_register error: {e}")
+                return False
+        else:
+            rq = None
+
+        if rq is None:
+            try:
+                rq = fn(address, value, unit)
+            except Exception as e:
+                logger.debug(f"[{self.name}] write_register positional error: {e}")
+                return False
+
         return getattr(rq, "isError", lambda: True)() is False
 
-    def try_until_ok(self, fn, retries=1, delay=0.05, *a, **kw):
-        """
-        Attempts to call a function repeatedly until successful or retries are exhausted.
+    # --- public API used by drivers ---
+    def read_input(self, unit: int, address: int, count: int = 1) -> Optional[List[int]]:
+        return self._call_read("input", unit, address, count)
 
-        Args:
-            fn (function): The function to call.
-            retries (int): The number of retries to attempt (default is 1).
-            delay (float): The delay between retries in seconds (default is 0.05).
-            *a, **kw: Arguments passed to the function `fn`.
+    def read_holding(self, unit: int, address: int, count: int = 1) -> Optional[List[int]]:
+        return self._call_read("holding", unit, address, count)
 
-        Returns:
-            Any: The result of the function call if successful, or None if all retries fail.
-        """
+    def write_holding(self, unit: int, address: int, value: int) -> bool:
+        return self._call_write(unit, address, value)
+
+    def try_until_ok(self, fn, retries: int = 1, delay: float = 0.05, *a, **kw):
         for _ in range(max(1, retries)):
             try:
                 out = fn(*a, **kw)
                 if out is not None:
                     return out
             except Exception as e:
-                from time import sleep
                 logger.debug(f"[{self.name}] try_until_ok error: {e}")
             sleep(delay)
         return None
